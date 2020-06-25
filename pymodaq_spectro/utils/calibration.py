@@ -5,25 +5,28 @@ import numpy as np
 from PyQt5 import QtGui, QtWidgets
 from PyQt5.QtCore import QObject, pyqtSlot, pyqtSignal, QLocale, QDateTime, QRectF, QDate, QThread, Qt
 from pyqtgraph.dockarea import Dock
-from pymodaq.daq_utils.daq_utils import DockArea
+from pymodaq.daq_utils.gui_utils import DockArea
 from pymodaq.daq_utils.plotting.viewer1D.viewer1D_main import Viewer1D
 from pyqtgraph.parametertree import Parameter, ParameterTree
 from pymodaq_spectro.utils.utils_classes import PandasModel
 
-from pymodaq.daq_utils.h5browser import browse_data
+from pymodaq.daq_utils.h5modules import browse_data
 import pyqtgraph.parametertree.parameterTypes as pTypes
 import pymodaq.daq_utils.custom_parameter_tree as custom_tree
 from pyqtgraph import TextItem, ArrowItem
-from pymodaq.daq_utils.daq_utils import Enm2cmrel, Ecmrel2Enm, nm2eV, eV2nm, eV2radfs, l2w
-import tables
+from pymodaq.daq_utils.daq_utils import Enm2cmrel, Ecmrel2Enm, nm2eV, eV2nm, eV2radfs, l2w, set_logger, get_module_name
 from pathlib import Path
 from scipy.signal import find_peaks
+
+logger = set_logger(get_module_name(__file__))
+peak_options = ['Height', 'Threshold', 'Distance', 'Prominence', 'Width',]
 
 class PeakGroup(pTypes.GroupParameter):
     def __init__(self, **opts):
         opts['type'] = 'group'
         opts['addText'] = "Add"
-        opts['addList'] = ['Height', 'Threshold', 'Distance', 'Prominence', 'Width',]
+        opts['addList'] = peak_options
+        self.channels = opts['channels']
         pTypes.GroupParameter.__init__(self, **opts)
         self.preset = dict(height=0, threshold=0, distance=1, prominence=0.5, width=1)
 
@@ -35,8 +38,9 @@ class PeakGroup(pTypes.GroupParameter):
             newindex = max(indexes) + 1
         child = {'title': 'Peak option', 'name': 'peak_option_{:02d}'.format(newindex), 'type': 'group', 'removable': True, 'renamable': False}
 
-        children = [{'name': typ.lower(), 'type': 'float', 'value': self.preset[typ.lower()],},
-                    {'title': 'Use?', 'name': 'use_opts', 'type': 'bool', 'value': True}
+        children = [{'title': 'Channel', 'name': 'channel', 'type': 'list', 'values': self.channels,},
+                    {'name': typ.lower(), 'type': 'float', 'value': self.preset[typ.lower()],},
+                    {'title': 'Use?', 'name': 'use_opts', 'type': 'bool', 'value': False}
                     ]
         child['children'] = children
         self.addChild(child)
@@ -55,7 +59,7 @@ class Calibration(QtWidgets.QWidget):
 
               ]},
               {'title': 'Peaks', 'name': 'peaks_table', 'type': 'table_view'},
-              PeakGroup(title='Peak options:', name="peak_options"),
+              PeakGroup(title='Peak options:', name="peak_options", channels=[]),
               ]
 
     def __init__(self, parent):
@@ -68,7 +72,7 @@ class Calibration(QtWidgets.QWidget):
 
         self.setupUI()
 
-        self.raw_datas = []
+        self.raw_datas = dict([])
         self.raw_axis = None
         self.text_peak_items = []
         self.arrow_peak_items = []
@@ -97,9 +101,9 @@ class Calibration(QtWidgets.QWidget):
     def add_spectrum_h5(self):
         data, fname, node_path = browse_data(ret_all=True)
         if data is not None:
-
-            self.filenames.append(Path(fname).parts[-1])
-            self.raw_datas.append(data)
+            file = Path(fname).parts[-1]
+            self.filenames.append(file)
+            self.raw_datas[file] = data
             self.raw_axis = np.linspace(0, len(data) - 1, len(data))
 
             # with tables.open_file(fname) as h5file:
@@ -109,11 +113,17 @@ class Calibration(QtWidgets.QWidget):
             #     if 'X_axis' in list(data_node._v_parent._v_children):
             #         self.raw_axis = data_node._v_parent._f_get_child('X_axis').read()
 
+            self.viewer_data.show_data(self.raw_datas.values(), x_axis=self.raw_axis, labels=self.filenames)
 
-            self.viewer_data.show_data(self.raw_datas, x_axis=self.raw_axis, labels=self.filenames)
+
+
+    def update_peak_source(self):
+        for child in self.settings.child(('peak_options')).children():
+            child.child(('channel')).setOpts(limits=self.filenames)
+
 
     def reset(self):
-        self.raw_datas = []
+        self.raw_datas = dict([])
         self.raw_axis = None
 
         self.viewer_data.remove_plots()
@@ -164,6 +174,7 @@ class Calibration(QtWidgets.QWidget):
             else:
                 childName = param.name()
             if change == 'childAdded':
+                self.update_peak_source()
                 if param.name() == 'peak_options':
                     QtWidgets.QApplication.processEvents()
                     #self.update_peak_finding()
@@ -183,53 +194,65 @@ class Calibration(QtWidgets.QWidget):
                 pass
 
     def update_peak_finding(self):
+        try:
+            if len(self.raw_datas) != 0:
+                peak_options = []
 
-        opts = dict([])
-        for child in self.settings.child(('peak_options')):
-            children = [ch.name() for ch in child.children() if ch.name() !='use_opts']
-            if child.child(('use_opts')).value():
-                param_opt = child.child((children[0]))
-                opts[param_opt.name()] = param_opt.value()
+                for channel in self.filenames:
 
-        self.peak_indexes = []
-        self.peak_amplitudes =[]
-        for data in self.raw_datas:
-            peak_indexes, properties = find_peaks(data, **opts)
-            self.peak_indexes.extend(list(peak_indexes))
-            self.peak_amplitudes.extend(list(data[peak_indexes]))
+                    opts = dict([])
+                    for child in self.settings.child(('peak_options')):
+                        if child.child(('channel')).value() == channel:
+                            children = [ch.name() for ch in child.children() if not(ch.name() =='use_opts' or ch.name() =='channel')]
+                            if child.child(('use_opts')).value():
+                                param_opt = child.child((children[0]))
+                                opts[param_opt.name()] = param_opt.value()
+                    if len(opts) != 0:
+                        peak_options.append(dict(channel=channel, opts=opts))
 
-        self.peak_indexes = np.array(self.peak_indexes)
-        self.peak_amplitudes = np.array(self.peak_amplitudes)
+                self.peak_indexes = []
+                self.peak_amplitudes = []
+                if len(peak_options) != 0:
+                    for option in peak_options:
+                        peak_indexes, properties = find_peaks(self.raw_datas[option['channel']], **option['opts'])
+                        self.peak_indexes.extend(list(peak_indexes))
+                        self.peak_amplitudes.extend(list(self.raw_datas[option['channel']][peak_indexes]))
 
-        arg_sorted_indexes = np.argsort(self.peak_indexes)
+                    self.peak_indexes = np.array(self.peak_indexes)
+                    self.peak_amplitudes = np.array(self.peak_amplitudes)
 
-        self.peak_indexes = self.peak_indexes[arg_sorted_indexes]
-        self.peak_amplitudes = self.peak_amplitudes[arg_sorted_indexes]
+                    arg_sorted_indexes = np.argsort(self.peak_indexes)
 
-        self.viewer_data.viewer.plotwidget.plotItem.removeItem(self.plot_peak_item)
-        while len(self.text_peak_items) != 0:
-            self.viewer_data.viewer.plotwidget.plotItem.removeItem(self.text_peak_items.pop(0))
-            self.viewer_data.viewer.plotwidget.plotItem.removeItem(self.arrow_peak_items.pop(0))
+                    self.peak_indexes = self.peak_indexes[arg_sorted_indexes]
+                    self.peak_amplitudes = self.peak_amplitudes[arg_sorted_indexes]
 
-        self.plot_peak_item = self.viewer_data.viewer.plotwidget.plot(self.raw_axis[self.peak_indexes], self.peak_amplitudes, pen=None, symbol='+')
 
-        for ind, peak_index in enumerate(self.peak_indexes):
-            item = TextItem('({:.00f},{:.02f})'.format(self.raw_axis[peak_index], self.peak_amplitudes[ind]), angle=45, color='w', anchor=(0,1))
-            size = self.viewer_data.viewer.plotwidget.plotItem.vb.itemBoundingRect(item)
-            item.setPos(self.raw_axis[peak_index], self.peak_amplitudes[ind]+size.height())
-            self.text_peak_items.append(item)
+                    if len(self.peak_indexes) != 0:
+                        self.viewer_data.viewer.plotwidget.plotItem.removeItem(self.plot_peak_item)
+                        while len(self.text_peak_items) != 0:
+                            self.viewer_data.viewer.plotwidget.plotItem.removeItem(self.text_peak_items.pop(0))
+                            self.viewer_data.viewer.plotwidget.plotItem.removeItem(self.arrow_peak_items.pop(0))
 
-            item_ar = ArrowItem(pos=(self.raw_axis[peak_index], self.peak_amplitudes[ind] + size.height() / 5),
-                                angle=-90, tipAngle=30, baseAngle=20,
-                      headLen=10, tailLen=20, tailWidth=1, pen=None, brush='w')
-            self.arrow_peak_items.append(item_ar)
-            self.viewer_data.viewer.plotwidget.plotItem.addItem(item)
-            self.viewer_data.viewer.plotwidget.plotItem.addItem(item_ar)
+                        self.plot_peak_item = self.viewer_data.viewer.plotwidget.plot(self.raw_axis[self.peak_indexes], self.peak_amplitudes, pen=None, symbol='+')
 
-        self.table_model = PandasModel(pd.DataFrame([[False, ind, 0] for ind in self.peak_indexes],
-                        columns=['Use', 'Pxl', self.settings.child('fit_options', 'fit_units').value()]))
-        self.settings.child(('peaks_table')).setValue(self.table_model)
+                        for ind, peak_index in enumerate(self.peak_indexes):
+                            item = TextItem('({:.00f},{:.02f})'.format(self.raw_axis[peak_index], self.peak_amplitudes[ind]), angle=45, color='w', anchor=(0,1))
+                            size = self.viewer_data.viewer.plotwidget.plotItem.vb.itemBoundingRect(item)
+                            item.setPos(self.raw_axis[peak_index], self.peak_amplitudes[ind]+size.height())
+                            self.text_peak_items.append(item)
 
+                            item_ar = ArrowItem(pos=(self.raw_axis[peak_index], self.peak_amplitudes[ind] + size.height() / 5),
+                                                angle=-90, tipAngle=30, baseAngle=20,
+                                      headLen=10, tailLen=20, tailWidth=1, pen=None, brush='w')
+                            self.arrow_peak_items.append(item_ar)
+                            self.viewer_data.viewer.plotwidget.plotItem.addItem(item)
+                            self.viewer_data.viewer.plotwidget.plotItem.addItem(item_ar)
+
+                        self.table_model = PandasModel(pd.DataFrame([[False, ind, 0] for ind in self.peak_indexes],
+                                        columns=['Use', 'Pxl', self.settings.child('fit_options', 'fit_units').value()]))
+                        self.settings.child(('peaks_table')).setValue(self.table_model)
+        except Exception as e:
+            logger.exception(str(e))
 
     def update_status(self,txt, log_type=None):
         """

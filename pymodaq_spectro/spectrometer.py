@@ -7,26 +7,25 @@ import numpy as np
 from copy import deepcopy
 from PyQt5 import QtGui, QtWidgets
 from PyQt5.QtCore import QObject, pyqtSlot, pyqtSignal, QLocale, QDateTime, QRectF, QDate, QThread, Qt
-
+from pathlib import Path
 from pyqtgraph.dockarea import Dock
-from pymodaq.daq_utils.daq_utils import DockArea
-
+from pymodaq.daq_utils.gui_utils import DockArea, select_file
 from pyqtgraph.parametertree import Parameter, ParameterTree
 import pyqtgraph.parametertree.parameterTypes as pTypes
 import pymodaq.daq_utils.custom_parameter_tree as custom_tree
-from pymodaq.daq_utils.daq_utils import select_file, Enm2cmrel, Ecmrel2Enm, nm2eV, eV2nm, eV2radfs, l2w, getLineInfo, ThreadCommand
+from pymodaq.daq_utils.daq_utils import Enm2cmrel, Ecmrel2Enm, nm2eV, eV2nm, eV2radfs, l2w, getLineInfo, ThreadCommand
 from pymodaq.daq_utils.plotting.qled import QLED
-
 from pymodaq.daq_viewer.daq_viewer_main import DAQ_Viewer
-from pymodaq.daq_move.daq_move_main import DAQ_Move
-from pymodaq.daq_utils.plotting.viewer0D.viewer0D_main import Viewer0D
 from pymodaq.daq_utils.plotting.viewer1D.viewer1D_main import Viewer1D
-from pymodaq.daq_utils.plotting.viewer2D.viewer2D_main import Viewer2D
-from pymodaq.daq_utils.h5browser import browse_data
 from pymodaq.daq_utils import daq_utils as utils
-from pymodaq.daq_utils.h5browser import H5Browser
-
+from pymodaq.daq_utils.h5modules import H5Browser, H5Saver
 from pymodaq_spectro.utils.calibration import Calibration
+from pymodaq.dashboard import DashBoard
+import logging
+
+logger = utils.set_logger(utils.get_module_name(__file__))
+spectro_path = utils.get_set_config_path('spectrometer_configs')
+
 
 class Spectrometer(QObject):
     """
@@ -45,7 +44,7 @@ class Spectrometer(QObject):
     params = [{'title': 'Configuration settings:', 'name': 'config_settings', 'type': 'group', 'children': [
                         {'title': 'Laser wavelength (nm):', 'name': 'laser_wl', 'type': 'float', 'value': 515.},
                         {'title': 'Laser wavelength (nm):', 'name': 'laser_wl_list', 'type': 'list', 'values':['']},
-                        {'title': 'List of detectors:', 'name': 'list_detector', 'type': 'list', 'values':['']},
+                        {'title': 'Current Detector:', 'name': 'curr_det', 'type': 'str', 'value': ''},
                         {'title': 'Show detector:', 'name': 'show_det', 'type': 'bool', 'value': False},
                         ],},
               {'title': 'Calibration settings:', 'name': 'calib_settings', 'type': 'group', 'children': [
@@ -78,7 +77,7 @@ class Spectrometer(QObject):
         self.dockarea = parent
         self.mainwindow = parent.parent()
         self.spectro_widget = QtWidgets.QWidget()
-
+        self.data_dict = None
         """
         List of the possible plugins that could be used with Spectrometer module
         type : dimensionality of the detector
@@ -91,14 +90,8 @@ class Spectrometer(QObject):
         laser_list: if laser is True, laser_list gives a list of selectable lasers
         
         """
-        self.detectors = [ dict(type='DAQ1D', name='Mock', plugin_name='Mock', calib=False, movable=False, unit='nm', laser=False, laser_list=[]),
-                           dict(type='DAQ1D', name='Mock_spectro', plugin_name='Mock_spectro', calib=True, movable=True, unit='nm',
-                                laser=True, laser_list=[405, 515, 632.8]),
-                            dict(type='DAQ1D', name='OceanOptics', plugin_name='OceanOptics', calib=True, movable=False, unit='nm', laser=False, laser_list=[]),
-                            dict(type='DAQ1D', name='Shamrock', plugin_name='Shamrock', calib=True, movable=True, unit='nm', laser=False, laser_list=[]),
-                            dict(type='DAQ1D', name='TCPServer', plugin_name='TCPServer', calib=False, movable=False, unit=None, laser=False, laser_list=[]),
-                            dict(type='DAQ2D', name='SpectroUV', plugin_name='AndorCCD', calib=False, movable=False, unit= None, laser=False, laser_list=[]),]
-        self.current_det = None #will be after initialization one of these dictionaries
+
+        self.current_det = None  # will be after initialization
 
         self.laser_set_manual = True
 
@@ -106,18 +99,35 @@ class Spectrometer(QObject):
         self.detector = None
         self.save_file_pathname = None
         self._spectro_wl = 550 # center wavelngth of the spectrum
-        self.viewer_freq_axis = dict(data=None, label='Photon energy', units='')
+        self.viewer_freq_axis = utils.Axis(data=None, label='Photon energy', units='')
         self.raw_data = []
 
         #init the user interface
+        self.dashboard = self.set_dashboard()
+        self.dashboard.preset_loaded_signal.connect(lambda: self.show_detector(False))
+        self.dashboard.preset_loaded_signal.connect(self.set_detector)
+        self.dashboard.preset_loaded_signal.connect(self.initialized)
         self.set_GUI()
 
-        dets = [det['name'] for det in self.detectors]
-        self.settings.child('config_settings', 'list_detector').setOpts(limits=dets)
-        self.settings.child('config_settings', 'list_detector').setValue('Mock')
+
         self.show_detector(False)
 
-
+    def set_dashboard(self):
+        params = [{'title': 'Spectro Settings:', 'name': 'spectro_settings', 'type': 'group', 'children': [
+            {'title': 'Spectro Name:', 'name': 'filename', 'type': 'str', 'value': 'spectro_default'},
+            {'title': 'Is calibrated?', 'name': 'iscalibrated', 'type': 'bool', 'value': False, 'tooltip':
+                'Whether the selected plugin has internal frequency calibration or not.'},
+            {'title': 'Movable?', 'name': 'ismovable', 'type': 'bool', 'value': False, 'tooltip':
+                'Whether the selected plugin has a functionality to change its central frequency: as a movable grating'
+                ' for instance.'},
+            {'title': 'Laser selectable?', 'name': 'laser_selectable', 'type': 'bool', 'value': False, 'tooltip':
+                'Whether the selected plugin has a functionality to change its excitation ray'},
+            {'title': 'Laser ray:', 'name': 'laser_ray', 'type': 'list', 'value': '', 'show_pb': True, 'tooltip':
+                'List of settable laser rays (not manual ones)'},]},
+        ]
+        dashboard = DashBoard(self.dockarea.addTempArea(), path=spectro_path, extra_params=params)
+        dashboard.dockarea.window().setVisible(False)
+        return dashboard
 
     def set_GUI(self):
         ###########################################
@@ -132,20 +142,7 @@ class Spectrometer(QObject):
         self.viewer = Viewer1D(target_widget)
         self.dock_viewer.addWidget(target_widget)
 
-        ###################################################################################
-        #create 2 docks to display the DAQ_Viewer (one for its settings, one for its viewer)
-        dock_detector_settings = Dock("Detector Settings", size=(350, 350))
-        self.dockarea.addDock(dock_detector_settings, 'right')
-        dock_detector_settings.float()
-        self.detector_area = dock_detector_settings.area
-        dock_detector = Dock("Detector Viewer", size=(350, 350))
-        self.detector_area.addDock(dock_detector, 'right', dock_detector_settings)
-        #init one daq_viewer object named detector
-        self.detector = DAQ_Viewer(self.dockarea, dock_settings=dock_detector_settings,
-                                                 dock_viewer=dock_detector, title="Spectro Detector", DAQ_type='DAQ1D')
-        self.detector.log_signal.connect(self.update_status)
-        self.detector.init_signal[bool].connect(self.initialized)
-        self.detector.custom_sig[ThreadCommand].connect(self.cmd_from_det)
+
         ################################################################
         #create a logger dock where to store info senf from the programm
         self.dock_logger = Dock("Logger")
@@ -198,7 +195,6 @@ class Spectrometer(QObject):
         self.statusbar.addPermanentWidget(self.status_center)
         self.statusbar.addPermanentWidget(self.status_init)
         self.dockarea.window().setStatusBar(self.statusbar)
-
 
         #############################################
         self.settings = Parameter.create(name='settings', type='group', children=self.params)
@@ -259,7 +255,7 @@ class Spectrometer(QObject):
                     self.update_axis()
 
         except Exception as e:
-            self.update_status(getLineInfo()+ str(e),self.wait_time,'log')
+            logger.exception(str(e))
 
     def update_status(self,txt, wait_time=1000, log_type=None):
         """
@@ -270,48 +266,40 @@ class Spectrometer(QObject):
             self.log_signal.emit(txt)
 
 
-    def init_detector(self):
-        self.settings.child('config_settings', 'list_detector').setOpts(readonly=self.init_action.isChecked())
-        if self.init_action.isChecked():
-            self.statusbar.showMessage('Initializing')
+    def set_detector(self):
 
-            self.detector.ui.IniDet_pb.click()
-            if self.detector.ui.Detector_type_combo.currentText() == 'Mock':
-                self.detector.settings.child('main_settings', 'wait_time').setValue(100)
-            QtWidgets.QApplication.processEvents()
-            QThread.msleep(1000)
-            self.detector.grab_done_signal.connect(self.show_data)
-            self.statusbar.clearMessage()
+        self.detector = self.dashboard.detector_modules[0]
+        self.settings.child('config_settings', 'curr_det').setValue(
+            f"{self.detector.settings.child('main_settings','DAQ_type').value()} / "
+            f"{self.detector.settings.child('main_settings','detector_type').value()} / {self.detector.title}")
+        self.detector.custom_sig[ThreadCommand].connect(self.cmd_from_det)
+        self.current_det = \
+            dict(laser=self.dashboard.preset_manager.preset_params.child('spectro_settings', 'laser_selectable').value(),
+                 laser_list=self.dashboard.preset_manager.preset_params.child('spectro_settings', 'laser_ray').opts['limits'],
+                 movable=self.dashboard.preset_manager.preset_params.child('spectro_settings', 'ismovable').value(),
+                 calib=self.dashboard.preset_manager.preset_params.child('spectro_settings', 'iscalibrated').value(),
+                 )
 
-            #set current detector
-            det_index = [det['plugin_name'] for det in self.detectors].index(self.detector.ui.Detector_type_combo.currentText())
-            self.current_det = self.detectors[det_index]
+        self.detector.grab_done_signal.connect(self.show_data)
 
-            self.settings.sigTreeStateChanged.disconnect(self.parameter_tree_changed)
-            if self.current_det['laser']:
-                self.settings.child('config_settings', 'laser_wl_list').show()
-                self.settings.child('config_settings', 'laser_wl').hide()
-                self.settings.child('config_settings', 'laser_wl_list').setOpts(limits=self.current_det['laser_list'])
-            else:
-                self.settings.child('config_settings', 'laser_wl').show()
-                self.settings.child('config_settings', 'laser_wl_list').hide()
-            self.settings.sigTreeStateChanged.connect(self.parameter_tree_changed)
-
-            #apply current detector particularities
-            #self.settings.child('acq_settings', 'spectro_center_freq').setOpts(readonly=not self.current_det['movable'])
-            self.get_spectro_wl()
-            QtWidgets.QApplication.processEvents()
-
-
-            self.get_laser_wl()
-            QtWidgets.QApplication.processEvents()
+        self.settings.sigTreeStateChanged.disconnect(self.parameter_tree_changed)
+        if self.current_det['laser']:
+            self.settings.child('config_settings', 'laser_wl_list').show()
+            self.settings.child('config_settings', 'laser_wl').hide()
+            self.settings.child('config_settings', 'laser_wl_list').setOpts(limits=self.current_det['laser_list'])
         else:
-            self.detector.ui.IniDet_pb.click()
-            self.status_laser.setText('????')
-            self.status_center.setText('????')
-            self.status_laser.setStyleSheet("background-color: red")
-            self.status_center.setStyleSheet("background-color: red")
-            #self.detector.grab_done_signal.disconnect()
+            self.settings.child('config_settings', 'laser_wl').show()
+            self.settings.child('config_settings', 'laser_wl_list').hide()
+        self.settings.sigTreeStateChanged.connect(self.parameter_tree_changed)
+
+        #apply current detector particularities
+        #self.settings.child('acq_settings', 'spectro_center_freq').setOpts(readonly=not self.current_det['movable'])
+        self.get_spectro_wl()
+        QtWidgets.QApplication.processEvents()
+
+
+        self.get_laser_wl()
+        QtWidgets.QApplication.processEvents()
 
     @pyqtSlot(bool)
     def initialized(self, state):
@@ -335,10 +323,11 @@ class Spectrometer(QObject):
         elif self.settings.child('acq_settings', 'units').value() == 'eV':
             self.settings.child('acq_settings', 'spectro_center_freq').setValue(nm2eV(spectro_wl))
 
-        self.status_center.setText('{:} {:}'.format(self.settings.child('acq_settings', 'spectro_center_freq').value(),
-                                                    self.settings.child('acq_settings', 'units').value()))
+        self.set_status_center(self.settings.child('acq_settings', 'spectro_center_freq').value(),
+                               self.settings.child('acq_settings', 'units').value())
 
-
+    def set_status_center(self, val, unit, precision=3):
+        self.status_center.setText(f'{val:.{precision}f} {unit}')
 
     def spectro_wl_is(self, spectro_wl):
         """
@@ -352,8 +341,11 @@ class Spectrometer(QObject):
 
 
     def set_spectro_wl(self, spectro_wl):
-        if self.current_det['movable']:
-            self.detector.command_detector.emit(ThreadCommand('set_spectro_wl', [spectro_wl]))
+        try:
+            if self.current_det['movable']:
+                self.detector.command_detector.emit(ThreadCommand('set_spectro_wl', [spectro_wl]))
+        except Exception as e:
+            logger.exception(str(e))
 
     def get_spectro_wl(self):
         if self.current_det['calib']:
@@ -383,7 +375,10 @@ class Spectrometer(QObject):
 
 
     def show_detector(self, show=True):
-        self.detector_area.window().setVisible(show)
+        self.dashboard.mainwindow.setVisible(show)
+        for area in self.dashboard.dockarea.tempAreas:
+            area.window().setVisible(show)
+
 
 
     def parameter_tree_changed(self, param, changes):
@@ -397,18 +392,7 @@ class Spectrometer(QObject):
                 pass
 
             elif change == 'value':
-                if param.name() == 'list_detector':
-                    if data is not None:
-                        dets = [det['name'] for det in self.detectors]
-                        ind = dets.index(data)
-                        det_type = self.detectors[ind]['type']
-                        det_plugin = self.detectors[ind]['plugin_name']
-                        self.detector.ui.DAQ_type_combo.setCurrentText(det_type)
-                        QtWidgets.QApplication.processEvents()
-
-                        self.detector.ui.Detector_type_combo.setCurrentText(det_plugin)
-
-                elif param.name() == 'show_det':
+                if param.name() == 'show_det':
                     self.show_detector(data)
 
                 elif param.name() == 'spectro_center_freq':
@@ -436,9 +420,8 @@ class Spectrometer(QObject):
                     elif data == 'eV':
                         self.settings.child('acq_settings', 'spectro_center_freq').setValue(nm2eV(self._spectro_wl))
 
-                    self.status_center.setText(
-                        '{:} {:}'.format(self.settings.child('acq_settings', 'spectro_center_freq').value(),
-                                         self.settings.child('acq_settings', 'units').value()))
+                    self.set_status_center(self.settings.child('acq_settings', 'spectro_center_freq').value(),
+                                           self.settings.child('acq_settings', 'units').value())
 
                 elif param.name() == 'laser_wl_list':
                     if data is not None:
@@ -468,7 +451,8 @@ class Spectrometer(QObject):
 
                     self.calibration.coeffs_calib.connect(self.update_calibration)
 
-                elif param.name() in custom_tree.iter_children(self.settings.child('calib_settings', 'calib_coeffs')) or param.name() == 'use_calib':
+                elif param.name() in custom_tree.iter_children(self.settings.child('calib_settings', 'calib_coeffs')) \
+                        or param.name() == 'use_calib':
                     if self.settings.child('calib_settings', 'use_calib').value():
                         calib_coeffs = [self.settings.child('calib_settings', 'calib_coeffs', 'third_calib').value(),
                                         self.settings.child('calib_settings', 'calib_coeffs', 'second_calib').value(),
@@ -524,17 +508,17 @@ class Spectrometer(QObject):
             if self.current_det['laser']:
                 self.detector.command_detector.emit(ThreadCommand('set_laser_wl', [laser_wavelength]))
         except Exception as e:
-            self.update_status(getLineInfo()+ str(e),self.wait_time,'log')
+            logger.exception(str(e))
 
     @pyqtSlot(OrderedDict)
-    def show_data(self,data):
+    def show_data(self, data):
         """
         do stuff with data from the detector if its grab_done_signal has been connected
         Parameters
         ----------
         data: (OrderedDict) #OrderedDict(name=self.title,x_axis=None,y_axis=None,z_axis=None,data0D=None,data1D=None,data2D=None)
         """
-
+        self.data_dict = data
         if 'data1D' in data:
             self.raw_data = []
             for key in data['data1D']:
@@ -551,7 +535,7 @@ class Spectrometer(QObject):
 
 
     def update_axis(self):
-        axis = dict([])
+        axis = utils.Axis()
         unit = self.settings.child('acq_settings', 'units').value()
         if unit == 'nm':
             axis['data'] = self.viewer_freq_axis['data']
@@ -577,21 +561,30 @@ class Spectrometer(QObject):
         """
         menubar.clear()
 
-        #%% create file menu
-        file_menu=menubar.addMenu('File')
-        load_action=file_menu.addAction('Load file')
+        # %% create file menu
+        file_menu = menubar.addMenu('File')
+        load_action = file_menu.addAction('Load file')
         load_action.triggered.connect(self.load_file)
-        save_action=file_menu.addAction('Save file')
+        save_action = file_menu.addAction('Save file')
         save_action.triggered.connect(self.save_data)
 
         file_menu.addSeparator()
-        quit_action=file_menu.addAction('Quit')
+        file_menu.addAction('Show log file', self.show_log)
+        file_menu.addSeparator()
+        quit_action = file_menu.addAction('Quit')
         quit_action.triggered.connect(self.quit_function)
 
-        settings_menu=menubar.addMenu('Settings')
-        docked_menu=settings_menu.addMenu('Docked windows')
-        action_load=docked_menu.addAction('Load Layout')
-        action_save=docked_menu.addAction('Save Layout')
+        settings_menu = menubar.addMenu('Settings')
+        docked_menu = settings_menu.addMenu('Docked windows')
+        action_load = docked_menu.addAction('Load Layout')
+        action_save = docked_menu.addAction('Save Layout')
+
+        self.preset_menu = menubar.addMenu(self.dashboard.preset_menu)
+
+
+    def show_log(self):
+        import webbrowser
+        webbrowser.open(logging.getLogger('pymodaq').handlers[0].baseFilename)
 
 
     def load_file(self):
@@ -602,9 +595,10 @@ class Spectrometer(QObject):
 
     def quit_function(self):
         #close all stuff that need to be
-        self.detector.quit_fun()
-        QtWidgets.QApplication.processEvents()
-        self.mainwindow.close()
+        if self.detector is not None:
+            self.detector.quit_fun()
+            QtWidgets.QApplication.processEvents()
+            self.mainwindow.close()
 
     def create_toolbar(self):
         self.toolbar.addWidget(QtWidgets.QLabel('Acquisition:'))
@@ -629,16 +623,6 @@ class Spectrometer(QObject):
         self.saveaction = QtWidgets.QAction(iconsave, "Save current data", None)
         self.toolbar.addAction(self.saveaction)
         self.saveaction.triggered.connect(self.save_data)
-
-        self.det_cb_action = QtWidgets.QComboBox()
-        self.det_cb_action.addItems([det['name'] for det in self.detectors])
-        self.det_cb_action.currentTextChanged[str].connect(lambda det: self.settings.child('config_settings', 'list_detector').setValue(det))
-        self.toolbar.addWidget(self.det_cb_action)
-
-        self.init_action = QtWidgets.QAction("Ini. det", None)
-        self.init_action.setCheckable(True)
-        self.toolbar.addAction(self.init_action)
-        self.init_action.triggered.connect(self.init_detector)
 
         iconrun = QtGui.QIcon()
         iconrun.addPixmap(QtGui.QPixmap(":/icons/Icon_Library/run2.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
@@ -666,39 +650,77 @@ class Spectrometer(QObject):
 
     def save_data(self):
         try:
-            fname = utils.select_file(start_path=self.save_file_pathname, save=True, ext='h5')
+            path = select_file(start_path=self.save_file_pathname, save=True, ext='h5')
+            if not (not(path)):
+                h5saver = H5Saver(save_type='detector')
+                h5saver.init_file(update_h5=True, custom_naming=False, addhoc_file_path=path)
 
-            if not (not (fname)):
-                with tables.open_file(str(fname), mode='w', title='an example h5 file name') as h5file:
-                    data_to_save = np.squeeze(np.array(self.raw_data))
-                    #save metadata
-                    h5file.root._v_attrs['settings'] = custom_tree.parameter_to_xml_string(self.settings)
-                    for ind in range(data_to_save.shape[1]):
-                        arr = h5file.create_array('/', 'data_{:d}'.format(ind), data_to_save[:,ind])
-                        arr._v_attrs['shape'] = data_to_save.shape[0]
-                        arr._v_attrs['type'] = 'data1D'
+                settings_str = b'<All_settings>' + custom_tree.parameter_to_xml_string(self.settings)
+                settings_str += custom_tree.parameter_to_xml_string(self.detector.settings)
+                if hasattr(self.detector.ui.viewers[0], 'roi_manager'):
+                    settings_str += custom_tree.parameter_to_xml_string(self.detector.ui.viewers[0].roi_manager.settings)
+                settings_str += custom_tree.parameter_to_xml_string(h5saver.settings)
+                settings_str += b'</All_settings>'
 
-                    arr = h5file.create_array('/', 'data_2D', data_to_save)
-                    arr._v_attrs['shape'] = data_to_save.shape
-                    arr._v_attrs['type'] = 'data2D'
+                det_group = h5saver.add_det_group(h5saver.raw_group, "Data", settings_str)
+                try:
+                    self.channel_arrays = OrderedDict([])
+                    data_dim = 'data1D'
+                    if not h5saver.is_node_in_group(det_group, data_dim):
+                        self.channel_arrays['data1D'] = OrderedDict([])
+                        data_group = h5saver.add_data_group(det_group, data_dim)
+                        for ind_channel, data in enumerate(self.raw_data):  # list of numpy arrays
+                            channel = f'CH{ind_channel:03d}'
+                            channel_group = h5saver.add_CH_group(data_group, title=channel)
+
+                            self.channel_arrays[data_dim]['parent'] = channel_group
+                            self.channel_arrays[data_dim][channel] = h5saver.add_data(channel_group,
+                                                                                      dict(data=data,
+                                                                                           x_axis=self.viewer_freq_axis),
+                                                                                      scan_type='',
+                                                                                      enlargeable=False)
+                except Exception as e:
+                    logger.exception(str(e))
 
 
 
-                    logger = "logging"
-                    text_atom = tables.atom.ObjectAtom()
-                    logger_array = h5file.create_vlarray('/', logger, atom=text_atom)
-                    logger_array._v_attrs['type'] = 'list'
-                    for ind_log in range(self.logger_list.count()):
-                        txt = self.logger_list.item(ind_log).text()
-                        logger_array.append(txt)
 
-                st = 'file {:s} has been saved'.format(fname)
-                self.add_log(st)
-                self.settings.child('min_settings', 'info').setValue(st)
+
+            # self.h5saver = H5Saver()
+            # if not (not (fname)):
+            #     self.h5saver.open_file(str(fname), mode='w', title="Data from PyMoDAQ's Spectrometer")
+            #     data_to_save = np.squeeze(np.array(self.raw_data))
+            #     #save metadata
+            #     self.h5saver.root().attrs['settings'] = custom_tree.parameter_to_xml_string(self.settings)
+            #     Nchannels = 1
+            #     if len(data_to_save.shape) == 2:
+            #         Nchannels = data_to_save.shape[1]
+            #     for ind in range(Nchannels):
+            #         arr = self.h5saver. create_array('/', 'data_{:d}'.format(ind), data_to_save[:,ind])
+            #         arr._v_attrs['shape'] = data_to_save.shape[0]
+            #         arr._v_attrs['type'] = 'data1D'
+            #
+            #     arr = h5file.create_array('/', 'data_2D', data_to_save)
+            #     arr._v_attrs['shape'] = data_to_save.shape
+            #     arr._v_attrs['type'] = 'data2D'
+            #
+            #
+            #
+            #     logg = "logging"
+            #     text_atom = tables.atom.ObjectAtom()
+            #     logger_array = h5file.create_vlarray('/', logg, atom=text_atom)
+            #     logger_array._v_attrs['type'] = 'list'
+            #     for ind_log in range(self.logger_list.count()):
+            #         txt = self.logger_list.item(ind_log).text()
+            #         logger_array.append(txt)
+            #
+            #     st = 'file {:s} has been saved'.format(fname)
+            #     self.add_log(st)
+            #     self.settings.child('min_settings', 'info').setValue(st)
 
 
         except Exception as e:
-            self.add_log(str(e))
+            logger.exception(str(e))
 
 
     @pyqtSlot(str)
@@ -744,3 +766,4 @@ if __name__ == '__main__':
     prog = Spectrometer(area)
     win.show()
     sys.exit(app.exec_())
+
