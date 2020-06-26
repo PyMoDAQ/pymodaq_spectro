@@ -49,6 +49,8 @@ class Spectrometer(QObject):
                         ],},
               {'title': 'Calibration settings:', 'name': 'calib_settings', 'type': 'group', 'children': [
                   {'title': 'Use calibration:', 'name': 'use_calib', 'type': 'bool', 'value': False},
+                  {'title': 'Save calibration', 'name': 'save_calib', 'type': 'bool_push', 'value': False},
+                  {'title': 'Load calibration', 'name': 'load_calib', 'type': 'bool_push', 'value': False},
                   {'title': 'Calibration coeffs:', 'name': 'calib_coeffs', 'type': 'group', 'children': [
                       {'title': 'Center wavelength (nm):', 'name': 'center_calib', 'type': 'float', 'value': 515.},
                       {'title': 'Slope (nm/pxl):', 'name': 'slope_calib', 'type': 'float', 'value': 1.},
@@ -306,6 +308,15 @@ class Spectrometer(QObject):
         self.get_laser_wl()
         QtWidgets.QApplication.processEvents()
 
+        self.get_exposure_ms()
+        QtWidgets.QApplication.processEvents()
+
+    def get_exposure_ms(self):
+        self.detector.command_detector.emit(ThreadCommand('get_exposure_ms'))
+
+    def set_exposure_ms(self, data):
+        self.detector.command_detector.emit(ThreadCommand('set_exposure_ms', [data]))
+
     @pyqtSlot(bool)
     def initialized(self, state):
         self.grab_action.setEnabled(state)
@@ -417,16 +428,17 @@ class Spectrometer(QObject):
 
 
                 elif param.name() == 'units':
-                    if data == 'nm':
-                        self.settings.child('acq_settings', 'spectro_center_freq').setValue(self._spectro_wl)
-                    elif data == 'cm-1':
-                        self.settings.child('acq_settings', 'spectro_center_freq').setValue(Enm2cmrel(self._spectro_wl,
-                                                self.settings.child( 'config_settings', 'laser_wl').value()))
-                    elif data == 'eV':
-                        self.settings.child('acq_settings', 'spectro_center_freq').setValue(nm2eV(self._spectro_wl))
+                    if self.settings.child('acq_settings', 'spectro_center_freq').value() > 0.000000001:
+                        if data == 'nm':
+                            self.settings.child('acq_settings', 'spectro_center_freq').setValue(self._spectro_wl)
+                        elif data == 'cm-1':
+                            self.settings.child('acq_settings', 'spectro_center_freq').setValue(Enm2cmrel(self._spectro_wl,
+                                                    self.settings.child( 'config_settings', 'laser_wl').value()))
+                        elif data == 'eV':
+                            self.settings.child('acq_settings', 'spectro_center_freq').setValue(nm2eV(self._spectro_wl))
 
-                    self.set_status_center(self.settings.child('acq_settings', 'spectro_center_freq').value(),
-                                           self.settings.child('acq_settings', 'units').value())
+                        self.set_status_center(self.settings.child('acq_settings', 'spectro_center_freq').value(),
+                                               self.settings.child('acq_settings', 'units').value())
 
                 elif param.name() == 'laser_wl_list':
                     if data is not None:
@@ -446,15 +458,34 @@ class Spectrometer(QObject):
 
 
                 elif param.name() == 'exposure_ms':
-                    self.detector.command_detector.emit(ThreadCommand('set_exposure_ms', [data]))
+                    self.set_exposure_ms(data)
 
                 elif param.name() == 'do_calib':
-                    dock = Dock('Calibration module')
-                    self.dockarea.addDock(dock)
-                    self.calibration = Calibration(self.dockarea)
-                    dock.addWidget(self.calibration)
+                    if len(self.raw_data) != 0:
+                        if data:
+                            self.calib_dock = Dock('Calibration module')
+                            self.dockarea.addDock(self.calib_dock)
+                            self.calibration = Calibration(self.dockarea)
+                            self.calib_dock.addWidget(self.calibration)
 
-                    self.calibration.coeffs_calib.connect(self.update_calibration)
+                            self.calibration.coeffs_calib.connect(self.update_calibration)
+                        else:
+                            self.calib_dock.close()
+
+                elif param.name() == 'save_calib':
+                    filename = select_file(start_path=self.save_file_pathname, save=True, ext='xml')
+                    if filename != '':
+                        custom_tree.parameter_to_xml_file(self.settings.child('calib_settings', 'calib_coeffs'), filename)
+
+                elif param.name() == 'load_calib':
+                    filename = select_file(start_path=self.save_file_pathname, save=False, ext='xml')
+                    if filename != '':
+                        children = custom_tree.XML_file_to_parameter(filename)
+                        self.settings.child('calib_settings', 'calib_coeffs').restoreState(
+                            Parameter.create(title='Calibration coeffs:', name='calib_coeffs', type='group',
+                                             children=children).saveState())
+
+
 
                 elif param.name() in custom_tree.iter_children(self.settings.child('calib_settings', 'calib_coeffs')) \
                         or param.name() == 'use_calib':
