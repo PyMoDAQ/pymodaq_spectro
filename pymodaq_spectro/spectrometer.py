@@ -108,13 +108,12 @@ class Spectrometer(QObject):
         self.dashboard.preset_loaded_signal.connect(self.set_detector)
         self.dashboard.preset_loaded_signal.connect(self.initialized)
         self.set_GUI()
-
+        self.dashboard.new_preset_created.connect(lambda: self.create_menu(self.menubar))
 
         self.show_detector(False)
 
     def set_dashboard(self):
         params = [{'title': 'Spectro Settings:', 'name': 'spectro_settings', 'type': 'group', 'children': [
-            {'title': 'Spectro Name:', 'name': 'filename', 'type': 'str', 'value': 'spectro_default'},
             {'title': 'Is calibrated?', 'name': 'iscalibrated', 'type': 'bool', 'value': False, 'tooltip':
                 'Whether the selected plugin has internal frequency calibration or not.'},
             {'title': 'Movable?', 'name': 'ismovable', 'type': 'bool', 'value': False, 'tooltip':
@@ -125,7 +124,13 @@ class Spectrometer(QObject):
             {'title': 'Laser ray:', 'name': 'laser_ray', 'type': 'list', 'value': '', 'show_pb': True, 'tooltip':
                 'List of settable laser rays (not manual ones)'},]},
         ]
-        dashboard = DashBoard(self.dockarea.addTempArea(), path=spectro_path, extra_params=params)
+        dashboard = DashBoard(self.dockarea.addTempArea())
+        dashboard.set_preset_path(spectro_path)
+        options =[dict(path='saving_options', options_dict=dict(visible=False)),
+                  dict(path='use_pid', options_dict=dict(visible=False)),
+                  dict(path='Moves', options_dict=dict(visible=False))]
+        dashboard.set_extra_preset_params(params, options)
+
         dashboard.dockarea.window().setVisible(False)
         return dashboard
 
@@ -168,7 +173,7 @@ class Spectrometer(QObject):
         self.statusbar = QtWidgets.QStatusBar()
         self.statusbar.setMaximumHeight(25)
 
-        self.status_laser =  QtWidgets.QLabel('????')
+        self.status_laser = QtWidgets.QLabel('????')
         self.status_laser.setAlignment(Qt.AlignCenter)
         #self.status_laser.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         #self.status_laser.setReadOnly(True)
@@ -257,7 +262,7 @@ class Spectrometer(QObject):
         except Exception as e:
             logger.exception(str(e))
 
-    def update_status(self,txt, wait_time=1000, log_type=None):
+    def update_status(self, txt, wait_time=1000, log_type=None):
         """
 
         """
@@ -547,13 +552,6 @@ class Spectrometer(QObject):
         axis['units'] = unit
         axis['label'] = 'Photon energy'
         self.viewer.x_axis = axis
-
-
-
-
-
-
-
 
 
     def create_menu(self, menubar):
