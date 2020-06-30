@@ -76,6 +76,7 @@ setup(
     install_requires=[
         'pymodaq',
         'pandas',
+        'units_converter',
     ],
     include_package_data=True,
     **setupOpts

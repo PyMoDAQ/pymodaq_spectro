@@ -21,6 +21,8 @@ from pymodaq.daq_utils import daq_utils as utils
 from pymodaq.daq_utils.h5modules import H5Browser, H5Saver
 from pymodaq_spectro.utils.calibration import Calibration
 from pymodaq.dashboard import DashBoard
+from units_converter.main import UnitsConverter
+
 import logging
 
 logger = utils.set_logger(utils.get_module_name(__file__))
@@ -604,6 +606,7 @@ class Spectrometer(QObject):
         quit_action.triggered.connect(self.quit_function)
 
         settings_menu = menubar.addMenu('Settings')
+        settings_menu.addAction('Show Units Converter', self.show_units_converter)
         docked_menu = settings_menu.addMenu('Docked windows')
         action_load = docked_menu.addAction('Load Layout')
         action_save = docked_menu.addAction('Save Layout')
@@ -615,6 +618,11 @@ class Spectrometer(QObject):
         import webbrowser
         webbrowser.open(logging.getLogger('pymodaq').handlers[0].baseFilename)
 
+    def show_units_converter(self):
+        self.units_converter = UnitsConverter()
+        dock_converter = Dock('Units Converter', size=(300, 350))
+        self.dockarea.addDock(dock_converter, 'bottom', self.dock_logger)
+        dock_converter.addWidget(self.units_converter.parent)
 
     def load_file(self):
         #init the data browser module
