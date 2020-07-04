@@ -8,6 +8,7 @@ from copy import deepcopy
 from PyQt5 import QtGui, QtWidgets
 from PyQt5.QtCore import QObject, pyqtSlot, pyqtSignal, QLocale, QDateTime, QRectF, QDate, QThread, Qt
 from pathlib import Path
+import pickle
 from pyqtgraph.dockarea import Dock
 from pymodaq.daq_utils.gui_utils import DockArea, select_file
 from pyqtgraph.parametertree import Parameter, ParameterTree
@@ -18,7 +19,7 @@ from pymodaq.daq_utils.plotting.qled import QLED
 from pymodaq.daq_viewer.daq_viewer_main import DAQ_Viewer
 from pymodaq.daq_utils.plotting.viewer1D.viewer1D_main import Viewer1D
 from pymodaq.daq_utils import daq_utils as utils
-from pymodaq.daq_utils.h5modules import H5Browser, H5Saver
+from pymodaq.daq_utils.h5modules import H5Browser, H5Saver, browse_data, H5BrowserUtil
 from pymodaq_spectro.utils.calibration import Calibration
 from pymodaq.dashboard import DashBoard
 from units_converter.main import UnitsConverter
@@ -77,7 +78,7 @@ class Spectrometer(QObject):
             raise Exception('no valid parent container, expected a DockArea')
 
         self.wait_time = 2000 #ms
-
+        self.offline = True
         self.dockarea = parent
         self.mainwindow = parent.parent()
         self.spectro_widget = QtWidgets.QWidget()
@@ -115,6 +116,7 @@ class Spectrometer(QObject):
         self.dashboard.new_preset_created.connect(lambda: self.create_menu(self.menubar))
 
         self.show_detector(False)
+        self.dockarea.setEnabled(False)
 
     def set_dashboard(self):
         params = [{'title': 'Spectro Settings:', 'name': 'spectro_settings', 'type': 'group', 'children': [
@@ -320,12 +322,13 @@ class Spectrometer(QObject):
         self.detector.command_detector.emit(ThreadCommand('set_exposure_ms', [data]))
 
     @pyqtSlot(bool)
-    def initialized(self, state):
+    def initialized(self, state, offline=False):
+        self.offline = offline
         self.grab_action.setEnabled(state)
         self.snap_action.setEnabled(state)
-        if state:
+        if state or offline:
             self.status_init.set_as_true()
-
+            self.dockarea.setEnabled(True)
         else:
             self.status_init.set_as_false()
 
@@ -563,8 +566,9 @@ class Spectrometer(QObject):
                 self.raw_data.append(data['data1D'][key]['data'])
                 if 'x_axis' in data['data1D'][key]:
                     x_axis = data['data1D'][key]['x_axis']
-
-                    if np.any(x_axis['data'] != self.viewer_freq_axis['data']) and self.current_det['calib']:
+                    if self.viewer_freq_axis['data'] is None:
+                        self.viewer_freq_axis.update(x_axis)
+                    elif np.any(x_axis['data'] != self.viewer_freq_axis['data']) and self.current_det['calib']:
                         self.viewer_freq_axis.update(x_axis)
 
             self.viewer.show_data(self.raw_data)
@@ -598,6 +602,8 @@ class Spectrometer(QObject):
         load_action.triggered.connect(self.load_file)
         save_action = file_menu.addAction('Save file')
         save_action.triggered.connect(self.save_data)
+        export_action = file_menu.addAction('Export as ascii')
+        export_action.triggered.connect(lambda: self.save_data(export=True))
 
         file_menu.addSeparator()
         file_menu.addAction('Show log file', self.show_log)
@@ -608,10 +614,54 @@ class Spectrometer(QObject):
         settings_menu = menubar.addMenu('Settings')
         settings_menu.addAction('Show Units Converter', self.show_units_converter)
         docked_menu = settings_menu.addMenu('Docked windows')
-        action_load = docked_menu.addAction('Load Layout')
-        action_save = docked_menu.addAction('Save Layout')
+        docked_menu.addAction('Load Layout', self.load_layout_state)
+        docked_menu.addAction('Save Layout', self.save_layout_state)
 
         self.preset_menu = menubar.addMenu(self.dashboard.preset_menu)
+        self.preset_menu.menu().addSeparator()
+        self.preset_menu.menu().addAction('Offline Mode', lambda: self.initialized(state=False, offline=True))
+
+    def load_layout_state(self, file=None):
+        """
+            Load and restore a layout state from the select_file obtained pathname file.
+
+            See Also
+            --------
+            utils.select_file
+        """
+        try:
+            if file is None:
+                file = select_file(save=False, ext='dock')
+            if file is not None:
+                with open(str(file), 'rb') as f:
+                    dockstate = pickle.load(f)
+                    self.dockarea.restoreState(dockstate)
+            file = file.name
+            self.settings.child('loaded_files', 'layout_file').setValue(file)
+        except Exception as e:
+            logger.exception(str(e))
+
+    def save_layout_state(self, file=None):
+        """
+            Save the current layout state in the select_file obtained pathname file.
+            Once done dump the pickle.
+
+            See Also
+            --------
+            utils.select_file
+        """
+        try:
+            dockstate = self.dockarea.saveState()
+            if 'float' in dockstate:
+                dockstate['float'] = []
+            if file is None:
+                file = select_file(start_path=None, save=True, ext='dock')
+            if file is not None:
+                with open(str(file), 'wb') as f:
+                    pickle.dump(dockstate, f, pickle.HIGHEST_PROTOCOL)
+        except Exception as e:
+            logger.exception(str(e))
+
 
 
     def show_log(self):
@@ -625,10 +675,17 @@ class Spectrometer(QObject):
         dock_converter.addWidget(self.units_converter.parent)
 
     def load_file(self):
-        #init the data browser module
-        widg = QtWidgets.QWidget()
-        self.data_browser = H5Browser(widg)
-        widg.show()
+        data, fname, node_path = browse_data(ret_all=True)
+        if data is not None:
+            h5utils = H5BrowserUtil()
+            h5utils.open_file(fname)
+            data, axes, nav_axes, is_spread = h5utils.get_h5_data(node_path)
+            data_node = h5utils.get_node(node_path)
+            if data_node.attrs['type'] == 'data':
+                if data_node.attrs['data_dimension'] == '1D':
+                    data_dict = OrderedDict(data1D=dict(raw=dict(data=data, x_axis=axes['x_axis'])))
+                    self.show_data(data_dict)
+            h5utils.close_file()
 
     def quit_function(self):
         #close all stuff that need to be
@@ -685,76 +742,50 @@ class Spectrometer(QObject):
         self.detector.ui.single_pb.click()
 
 
-    def save_data(self):
+    def save_data(self, export=False):
         try:
-            path = select_file(start_path=self.save_file_pathname, save=True, ext='h5')
+            if export:
+                ext = 'dat'
+            else:
+                ext = 'h5'
+            path = select_file(start_path=self.save_file_pathname, save=True, ext=ext)
             if not (not(path)):
-                h5saver = H5Saver(save_type='detector')
-                h5saver.init_file(update_h5=True, custom_naming=False, addhoc_file_path=path)
+                if not export:
+                    h5saver = H5Saver(save_type='detector')
+                    h5saver.init_file(update_h5=True, custom_naming=False, addhoc_file_path=path)
 
-                settings_str = b'<All_settings>' + custom_tree.parameter_to_xml_string(self.settings)
-                settings_str += custom_tree.parameter_to_xml_string(self.detector.settings)
-                if hasattr(self.detector.ui.viewers[0], 'roi_manager'):
-                    settings_str += custom_tree.parameter_to_xml_string(self.detector.ui.viewers[0].roi_manager.settings)
-                settings_str += custom_tree.parameter_to_xml_string(h5saver.settings)
-                settings_str += b'</All_settings>'
+                    settings_str = b'<All_settings>' + custom_tree.parameter_to_xml_string(self.settings)
+                    if self.detector is not None:
+                        settings_str += custom_tree.parameter_to_xml_string(self.detector.settings)
+                        if hasattr(self.detector.ui.viewers[0], 'roi_manager'):
+                            settings_str += custom_tree.parameter_to_xml_string(self.detector.ui.viewers[0].roi_manager.settings)
+                    settings_str += custom_tree.parameter_to_xml_string(h5saver.settings)
+                    settings_str += b'</All_settings>'
 
-                det_group = h5saver.add_det_group(h5saver.raw_group, "Data", settings_str)
-                try:
-                    self.channel_arrays = OrderedDict([])
-                    data_dim = 'data1D'
-                    if not h5saver.is_node_in_group(det_group, data_dim):
-                        self.channel_arrays['data1D'] = OrderedDict([])
-                        data_group = h5saver.add_data_group(det_group, data_dim)
-                        for ind_channel, data in enumerate(self.raw_data):  # list of numpy arrays
-                            channel = f'CH{ind_channel:03d}'
-                            channel_group = h5saver.add_CH_group(data_group, title=channel)
+                    det_group = h5saver.add_det_group(h5saver.raw_group, "Data", settings_str)
+                    try:
+                        self.channel_arrays = OrderedDict([])
+                        data_dim = 'data1D'
+                        if not h5saver.is_node_in_group(det_group, data_dim):
+                            self.channel_arrays['data1D'] = OrderedDict([])
+                            data_group = h5saver.add_data_group(det_group, data_dim)
+                            for ind_channel, data in enumerate(self.raw_data):  # list of numpy arrays
+                                channel = f'CH{ind_channel:03d}'
+                                channel_group = h5saver.add_CH_group(data_group, title=channel)
 
-                            self.channel_arrays[data_dim]['parent'] = channel_group
-                            self.channel_arrays[data_dim][channel] = h5saver.add_data(channel_group,
-                                                                                      dict(data=data,
-                                                                                           x_axis=self.viewer_freq_axis),
-                                                                                      scan_type='',
-                                                                                      enlargeable=False)
-                except Exception as e:
-                    logger.exception(str(e))
-
-
-
-
-
-            # self.h5saver = H5Saver()
-            # if not (not (fname)):
-            #     self.h5saver.open_file(str(fname), mode='w', title="Data from PyMoDAQ's Spectrometer")
-            #     data_to_save = np.squeeze(np.array(self.raw_data))
-            #     #save metadata
-            #     self.h5saver.root().attrs['settings'] = custom_tree.parameter_to_xml_string(self.settings)
-            #     Nchannels = 1
-            #     if len(data_to_save.shape) == 2:
-            #         Nchannels = data_to_save.shape[1]
-            #     for ind in range(Nchannels):
-            #         arr = self.h5saver. create_array('/', 'data_{:d}'.format(ind), data_to_save[:,ind])
-            #         arr._v_attrs['shape'] = data_to_save.shape[0]
-            #         arr._v_attrs['type'] = 'data1D'
-            #
-            #     arr = h5file.create_array('/', 'data_2D', data_to_save)
-            #     arr._v_attrs['shape'] = data_to_save.shape
-            #     arr._v_attrs['type'] = 'data2D'
-            #
-            #
-            #
-            #     logg = "logging"
-            #     text_atom = tables.atom.ObjectAtom()
-            #     logger_array = h5file.create_vlarray('/', logg, atom=text_atom)
-            #     logger_array._v_attrs['type'] = 'list'
-            #     for ind_log in range(self.logger_list.count()):
-            #         txt = self.logger_list.item(ind_log).text()
-            #         logger_array.append(txt)
-            #
-            #     st = 'file {:s} has been saved'.format(fname)
-            #     self.add_log(st)
-            #     self.settings.child('min_settings', 'info').setValue(st)
-
+                                self.channel_arrays[data_dim]['parent'] = channel_group
+                                self.channel_arrays[data_dim][channel] = h5saver.add_data(channel_group,
+                                                                                          dict(data=data,
+                                                                                               x_axis=self.viewer_freq_axis),
+                                                                                          scan_type='',
+                                                                                          enlargeable=False)
+                        h5saver.close_file()
+                    except Exception as e:
+                        logger.exception(str(e))
+                else:
+                    data_to_save = [self.viewer_freq_axis['data']]
+                    data_to_save.extend([dat for dat in self.raw_data])
+                    np.savetxt(path, data_to_save, delimiter='\t')
 
         except Exception as e:
             logger.exception(str(e))
