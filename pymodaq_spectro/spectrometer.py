@@ -377,7 +377,7 @@ class Spectrometer(QObject):
         else:
             self.settings.child('acq_settings', 'spectro_center_freq').hide()
             self.settings.child('acq_settings', 'spectro_center_freq_txt').show()
-            self.viewer_freq_axis['unit'] = 'Pxls'
+            self.viewer_freq_axis['units'] = 'Pxls'
 
     def get_laser_wl(self):
         if self.current_det['laser']:
@@ -566,10 +566,15 @@ class Spectrometer(QObject):
                 self.raw_data.append(data['data1D'][key]['data'])
                 if 'x_axis' in data['data1D'][key]:
                     x_axis = data['data1D'][key]['x_axis']
-                    if self.viewer_freq_axis['data'] is None:
-                        self.viewer_freq_axis.update(x_axis)
-                    elif np.any(x_axis['data'] != self.viewer_freq_axis['data']) and self.current_det['calib']:
-                        self.viewer_freq_axis.update(x_axis)
+                else:
+                    x_axis = utils.Axis(
+                        data=np.linspace(0, len(data['data1D'][key]['data'])-1, len(data['data1D'][key]['data'])),
+                        units='pxls',
+                        label='')
+                if self.viewer_freq_axis['data'] is None:
+                    self.viewer_freq_axis.update(x_axis)
+                elif np.any(x_axis['data'] != self.viewer_freq_axis['data']) and self.current_det['calib']:
+                    self.viewer_freq_axis.update(x_axis)
 
             self.viewer.show_data(self.raw_data)
             self.update_axis()
