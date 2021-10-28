@@ -1,6 +1,6 @@
 import sys
-from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtCore import QVariant, Qt, QModelIndex
+from qtpy import QtCore, QtWidgets
+from qtpy.QtCore import QVariant, Qt, QModelIndex
 import numpy as np
 import pandas as pd
 

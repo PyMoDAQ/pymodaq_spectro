@@ -5,8 +5,8 @@ import datetime
 import os
 import numpy as np
 from copy import deepcopy
-from PyQt5 import QtGui, QtWidgets
-from PyQt5.QtCore import QObject, pyqtSlot, pyqtSignal, QLocale, QDateTime, QRectF, QDate, QThread, Qt
+from qtpy import QtGui, QtWidgets
+from qtpy.QtCore import QObject, Slot, Signal, QLocale, QDateTime, QRectF, QDate, QThread, Qt
 from pathlib import Path
 import pickle
 from pyqtgraph.dockarea import Dock
@@ -41,7 +41,7 @@ class Spectrometer(QObject):
 
     """
     #custom signal that will be fired sometimes. Could be connected to an external object method or an internal method
-    log_signal = pyqtSignal(str)
+    log_signal = Signal(str)
 
     #list of dicts enabling the settings tree on the user interface
     params = [{'title': 'Configuration settings:', 'name': 'config_settings', 'type': 'group', 'children': [
@@ -241,7 +241,7 @@ class Spectrometer(QObject):
         self.acq_settings_tree.setParameters(self.settings.child(('acq_settings')), showTop=False)
 
 
-    @pyqtSlot(ThreadCommand)
+    @Slot(ThreadCommand)
     def cmd_from_det(self,status):
         try:
             if status.command == 'spectro_wl':
@@ -321,7 +321,7 @@ class Spectrometer(QObject):
     def set_exposure_ms(self, data):
         self.detector.command_detector.emit(ThreadCommand('set_exposure_ms', [data]))
 
-    @pyqtSlot(bool)
+    @Slot(bool)
     def initialized(self, state, offline=False):
         self.offline = offline
         self.grab_action.setEnabled(state)
@@ -517,7 +517,7 @@ class Spectrometer(QObject):
             elif change == 'parent':
                 pass
 
-    @pyqtSlot(list)
+    @Slot(list)
     def update_calibration(self, coeffs):
         self.settings.child('calib_settings', 'calib_coeffs', 'center_calib').setValue(coeffs[0])
         self.settings.child('calib_settings', 'calib_coeffs', 'slope_calib').setValue(coeffs[1])
@@ -551,7 +551,7 @@ class Spectrometer(QObject):
         except Exception as e:
             logger.exception(str(e))
 
-    @pyqtSlot(OrderedDict)
+    @Slot(OrderedDict)
     def show_data(self, data):
         """
         do stuff with data from the detector if its grab_done_signal has been connected
@@ -796,7 +796,7 @@ class Spectrometer(QObject):
             logger.exception(str(e))
 
 
-    @pyqtSlot(str)
+    @Slot(str)
     def add_log(self, txt):
         """
             Add a log to the logger list from the given text log and the current time
@@ -814,7 +814,7 @@ class Spectrometer(QObject):
         ##to do
         ##self.save_parameters.logger_array.append(str(now)+": "+txt)
 
-    @pyqtSlot(str)
+    @Slot(str)
     def emit_log(self, txt):
         """
             Emit a log-signal from the given log index

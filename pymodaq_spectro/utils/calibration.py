@@ -2,8 +2,8 @@ import sys
 import pandas as pd
 import numpy as np
 
-from PyQt5 import QtGui, QtWidgets
-from PyQt5.QtCore import QObject, pyqtSlot, pyqtSignal, QLocale, QDateTime, QRectF, QDate, QThread, Qt
+from qtpy import QtGui, QtWidgets
+from qtpy.QtCore import QObject, Slot, Signal, QLocale, QDateTime, QRectF, QDate, QThread, Qt
 from pyqtgraph.dockarea import Dock
 from pymodaq.daq_utils.gui_utils import DockArea
 from pymodaq.daq_utils.plotting.viewer1D.viewer1D_main import Viewer1D
@@ -48,8 +48,8 @@ class PeakGroup(pTypes.GroupParameter):
 
 
 class Calibration(QtWidgets.QWidget):
-    log_signal = pyqtSignal(str)
-    coeffs_calib = pyqtSignal(list)
+    log_signal = Signal(str)
+    coeffs_calib = Signal(list)
 
     params = [{'title': 'Laser wavelength (nm):', 'name': 'laser_wl', 'type': 'float', 'value': 515.},
               {'title': 'Fit options:', 'name': 'fit_options', 'type': 'group', 'children': [
