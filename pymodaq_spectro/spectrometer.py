@@ -46,7 +46,7 @@ class Spectrometer(QObject):
     #list of dicts enabling the settings tree on the user interface
     params = [{'title': 'Configuration settings:', 'name': 'config_settings', 'type': 'group', 'children': [
                         {'title': 'Laser wavelength (nm):', 'name': 'laser_wl', 'type': 'float', 'value': 515.},
-                        {'title': 'Laser wavelength (nm):', 'name': 'laser_wl_list', 'type': 'list', 'values':['']},
+                        {'title': 'Laser wavelength (nm):', 'name': 'laser_wl_list', 'type': 'list', 'limits':['']},
                         {'title': 'Current Detector:', 'name': 'curr_det', 'type': 'str', 'value': ''},
                         {'title': 'Show detector:', 'name': 'show_det', 'type': 'bool', 'value': False},
                         ],},
@@ -65,7 +65,7 @@ class Spectrometer(QObject):
               {'title': 'Acquisition settings:', 'name': 'acq_settings', 'type': 'group', 'children': [
                   {'title': 'Spectro. Center:', 'name': 'spectro_center_freq', 'type': 'float', 'value': 800,},
                   {'title': 'Spectro. Center:', 'name': 'spectro_center_freq_txt', 'type': 'str', 'value': '????', 'readonly':True },
-                  {'title': 'Units:', 'name': 'units', 'type': 'list', 'value': 'nm', 'values': ['nm', 'cm-1', 'eV']},
+                  {'title': 'Units:', 'name': 'units', 'type': 'list', 'value': 'nm', 'limits': ['nm', 'cm-1', 'eV']},
                   {'title': 'Exposure (ms):', 'name': 'exposure_ms', 'type': 'float', 'value': 100, },
               ]},
               ]

@@ -38,7 +38,7 @@ class PeakGroup(pTypes.GroupParameter):
             newindex = max(indexes) + 1
         child = {'title': 'Peak option', 'name': 'peak_option_{:02d}'.format(newindex), 'type': 'group', 'removable': True, 'renamable': False}
 
-        children = [{'title': 'Channel', 'name': 'channel', 'type': 'list', 'values': self.channels,},
+        children = [{'title': 'Channel', 'name': 'channel', 'type': 'list', 'limits': self.channels,},
                     {'name': typ.lower(), 'type': 'float', 'value': self.preset[typ.lower()],},
                     {'title': 'Use?', 'name': 'use_opts', 'type': 'bool', 'value': False}
                     ]
@@ -53,7 +53,7 @@ class Calibration(QtWidgets.QWidget):
 
     params = [{'title': 'Laser wavelength (nm):', 'name': 'laser_wl', 'type': 'float', 'value': 515.},
               {'title': 'Fit options:', 'name': 'fit_options', 'type': 'group', 'children': [
-                  {'title': 'Fit in?:', 'name': 'fit_units', 'type': 'list', 'value': 'nm', 'values': ['nm', 'cm-1', 'eV']},
+                  {'title': 'Fit in?:', 'name': 'fit_units', 'type': 'list', 'value': 'nm', 'limits': ['nm', 'cm-1', 'eV']},
                   {'title': 'Polynomial Fit order:', 'name': 'fit_order', 'type': 'int', 'value': 1, 'min': 1, 'max':3},
                   {'title': 'Do calib:', 'name': 'do_calib', 'type': 'bool', 'value': False},
 
